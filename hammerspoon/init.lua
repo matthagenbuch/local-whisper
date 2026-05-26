@@ -82,6 +82,61 @@ local ACTIONS_FILE = HOME .. "/.hammerspoon/local_whisper_actions.lua"
 local AUTO_STOP_SILENCE_SECONDS = 3
 local AUTO_STOP_THRESHOLD_DB = -40
 
+-- Pause audio playback during recording (requires nowplaying-cli)
+local PAUSE_AUDIO_FILE = CONFIG_DIR .. "/pause_audio"
+local NOWPLAYING_BIN = nil
+for _, p in ipairs({ "/opt/homebrew/bin/nowplaying-cli", "/usr/local/bin/nowplaying-cli" }) do
+    if hs.fs.attributes(p) then NOWPLAYING_BIN = p; break end
+end
+
+local function getPauseAudioMode()
+    local f = io.open(PAUSE_AUDIO_FILE, "r")
+    if not f then return false end
+    local val = f:read("*a"):gsub("%s+", ""); f:close()
+    return val == "on"
+end
+
+local function setPauseAudioMode(on)
+    local f = io.open(PAUSE_AUDIO_FILE, "w")
+    if f then f:write(on and "on" or "off"); f:close() end
+end
+
+local function cyclePauseAudio()
+    setPauseAudioMode(not getPauseAudioMode())
+end
+
+-- True only if we paused playback at recording start (so we know to resume)
+local pausedAudioAtStart = false
+
+local function isAudioPlaying()
+    if not NOWPLAYING_BIN then return false end
+    local out, ok = hs.execute(NOWPLAYING_BIN .. " get playbackRate 2>/dev/null")
+    if not ok or not out then return false end
+    return out:gsub("%s+", "") == "1"
+end
+
+local function sendPlayPauseKey()
+    hs.eventtap.event.newSystemKeyEvent("PLAY", true):post()
+    hs.eventtap.event.newSystemKeyEvent("PLAY", false):post()
+end
+
+local function maybePauseAudio()
+    pausedAudioAtStart = false
+    if not getPauseAudioMode() then return end
+    if not NOWPLAYING_BIN then return end
+    if isAudioPlaying() then
+        sendPlayPauseKey()
+        pausedAudioAtStart = true
+    end
+end
+
+local function maybeResumeAudio()
+    if pausedAudioAtStart then
+        sendPlayPauseKey()
+        pausedAudioAtStart = false
+    end
+end
+
 -- LLM refinement (requires Ollama)
 local REFINE_FILE = CONFIG_DIR .. "/refine"
 local REFINE_PROMPT_FILE = CONFIG_DIR .. "/refine_prompt"
@@ -999,6 +1054,20 @@ local function buildMenuBarMenu()
         })
     end
 
+    -- Pause audio during recording
+    if NOWPLAYING_BIN then
+        local pauseState = getPauseAudioMode() and "ON" or "OFF"
+        table.insert(items, {
+            title = "Pause audio while recording: " .. pauseState,
+            fn = function() cyclePauseAudio(); updateMenuBar() end,
+        })
+    else
+        table.insert(items, {
+            title = "Pause audio (brew install nowplaying-cli)",
+            disabled = true,
+        })
+    end
+
     -- Preferred langs
     local preferred = table.concat(getPreferredLangs(), ", ")
     table.insert(items, { title = "Preferred: " .. preferred, disabled = true })
@@ -1457,6 +1526,8 @@ local function startRecording()
     captureActiveApp()
     log("recording: app=" .. tostring(capturedAppName) .. " (" .. tostring(capturedAppBundleID) .. ")")
 
+    maybePauseAudio()
+
     showOverlay()
     startRecordingIndicator()
     updateMenuBar()
@@ -1496,6 +1567,8 @@ local function stopRecording()
 
     stopRecordingIndicator()
     updateMenuBar()
+
+    maybeResumeAudio()
 
     if ffmpegTask and ffmpegTask:isRunning() then
         ffmpegTask:interrupt()
