@@ -108,12 +108,9 @@ end
 -- True only if we paused playback at recording start (so we know to resume)
 local pausedAudioAtStart = false
 
-local function isAudioPlaying()
-    if not NOWPLAYING_BIN then return false end
-    local out, ok = hs.execute(NOWPLAYING_BIN .. " get playbackRate 2>/dev/null")
-    if not ok or not out then return false end
-    return out:gsub("%s+", "") == "1"
-end
+-- Forward-declared here so maybePauseAudio's async callback closes over the
+-- same upvalue as the recording state set later (see "State" section).
+local isRecording = false
 
 local function sendPlayPauseKey()
     hs.eventtap.event.newSystemKeyEvent("PLAY", true):post()
@@ -124,10 +121,18 @@ local function maybePauseAudio()
     pausedAudioAtStart = false
     if not getPauseAudioMode() then return end
     if not NOWPLAYING_BIN then return end
-    if isAudioPlaying() then
-        sendPlayPauseKey()
-        pausedAudioAtStart = true
-    end
+    -- Query playback state asynchronously — `nowplaying-cli get` blocks for
+    -- ~2-3s, so running it synchronously here would stall the main thread and
+    -- delay the overlay and ffmpeg start. The callback pauses shortly after.
+    hs.task.new(NOWPLAYING_BIN, function(code, out, err)
+        -- If recording already stopped, don't pause (avoids leaving audio
+        -- paused with no resume for very short dictations).
+        if not isRecording then return end
+        if out and out:gsub("%s+", "") == "1" then
+            sendPlayPauseKey()
+            pausedAudioAtStart = true
+        end
+    end, { "get", "playbackRate" }):start()
 end
 
 local function maybeResumeAudio()
@@ -909,7 +914,7 @@ end
 -- State
 --------------------------------------------------------------------------------
 
-local isRecording = false
+isRecording = false  -- forward-declared near maybePauseAudio
 local overlayPinned = false
 local ffmpegTask = nil
 local partialTimer = nil
