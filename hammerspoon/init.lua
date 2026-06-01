@@ -927,6 +927,7 @@ local menuBar = nil
 -- Recording indicator state
 local pulseTimer = nil
 local clockTimer = nil
+local captureLiveTimer = nil  -- polls for the first chunk so the "go" cue fires when capture is actually live
 local recordingStartTime = 0
 local pulseAlpha = 1.0
 local pulseFading = true
@@ -1217,6 +1218,7 @@ end
 function emergencyStop()
     log("emergency stop")
     isRecording = false
+    if captureLiveTimer then captureLiveTimer:stop(); captureLiveTimer = nil end
     if partialTimer then partialTimer:stop(); partialTimer = nil end
     if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
     stopRecordingIndicator()
@@ -1534,9 +1536,12 @@ local function startRecording()
     maybePauseAudio()
 
     showOverlay()
-    startRecordingIndicator()
+    -- avfoundation takes ~0.8s to open the mic, during which audio isn't
+    -- captured yet. Show a "Starting…" state and hold the pop + recording
+    -- indicator until the first chunk file appears (capture is live), so the
+    -- pop is an accurate "start talking now" cue instead of firing on keypress.
+    setOverlayText("Starting…")
     updateMenuBar()
-    hs.sound.getByFile("/System/Library/Sounds/Pop.aiff"):play()
 
     ffmpegTask = hs.task.new(FFMPEG, function(code, out, err)
         log("recording: ffmpeg exited " .. tostring(code))
@@ -1551,6 +1556,22 @@ local function startRecording()
     })
     ffmpegTask:start()
 
+    -- The segment muxer creates the first chunk file the moment capture goes
+    -- live, so its appearance is our cue that the mic is actually recording.
+    if captureLiveTimer then captureLiveTimer:stop() end
+    captureLiveTimer = hs.timer.doEvery(0.05, function()
+        if not isRecording then
+            captureLiveTimer:stop(); captureLiveTimer = nil
+            return
+        end
+        if #getChunkFiles() > 0 then
+            captureLiveTimer:stop(); captureLiveTimer = nil
+            setOverlayText("")
+            startRecordingIndicator()
+            hs.sound.getByFile("/System/Library/Sounds/Pop.aiff"):play()
+        end
+    end)
+
     lastChunkCount = 0
     partialBusy = false
     silentChunkCount = 0
@@ -1564,6 +1585,7 @@ local function stopRecording()
     isRecording = false
     log("recording: stop")
 
+    if captureLiveTimer then captureLiveTimer:stop(); captureLiveTimer = nil end
     if partialTimer then partialTimer:stop(); partialTimer = nil end
     if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
     partialBusy = false
